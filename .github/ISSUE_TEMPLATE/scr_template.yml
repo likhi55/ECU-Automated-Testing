@@ -1,0 +1,35 @@
+name: "Software Change Request (SCR)"
+description: "Use this template for ECU software change requests"
+title: "[SCR] - "
+labels: ["SCR", "open"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: SCR Description
+      description: Provide detailed description of the SCR.
+      placeholder: Describe the functionality change or addition.
+    validations:
+      required: true
+
+  - type: textarea
+    id: inputs
+    attributes:
+      label: Inputs
+      description: List all inputs/signals for this SCR.
+    validations:
+      required: true
+
+  - type: textarea
+    id: outputs
+    attributes:
+      label: Outputs
+      description: List all outputs/signals for this SCR.
+    validations:
+      required: true
+
+  - type: textarea
+    id: calibration
+    attributes:
+      label: Calibration Parameters
+      description: Provide calibration variables/constants.

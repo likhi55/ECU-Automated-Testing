@@ -1,0 +1,115 @@
+name: Run Testcases on PR Merge & Update SCR
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [ main, master ]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  test-and-update:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout merge commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - name: Set up build environment
+        run: sudo apt-get update && sudo apt-get install -y build-essential
+
+      - name: Build
+        run: make all
+
+      - name: Run testcases (bash)
+        run: |
+          if [ -x "./run_testcases.sh" ]; then
+            ./run_testcases.sh || true
+          else
+            echo "run_testcases.sh missing or not executable; attempting make test if present"
+            make test || true
+          fi
+
+      - name: Ensure Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Parse test summary
+        id: summary
+        run: |
+          python tools/parse_test_summary.py testcases_run_summary.md > result.txt || true
+          echo "result=$(cat result.txt)" >> $GITHUB_OUTPUT
+
+      - name: Upload summary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: testcases_run_summary
+          path: |
+            testcases_run_summary.md
+            **/log.txt
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Derive SCR ID from branch or PR
+        id: scr
+        run: |
+          PR_BRANCH="${{ github.event.pull_request.head.ref }}"
+          PR_TITLE="${{ github.event.pull_request.title }}"
+          PR_BODY=$(echo "${{ github.event.pull_request.body }}" | tr '\n' ' ')
+          EXTRACT() { echo "$1" | grep -oE 'SCR[0-9]{6}' | head -n1 || true; }
+          ID=$(EXTRACT "$PR_BRANCH")
+          if [ -z "$ID" ]; then ID=$(EXTRACT "$PR_TITLE"); fi
+          if [ -z "$ID" ]; then ID=$(EXTRACT "$PR_BODY"); fi
+          echo "id=$ID" >> $GITHUB_OUTPUT
+          echo "SCR_ID=$ID"
+      
+      - name: Update linked SCR issue
+        if: steps.scr.outputs.id != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const scrId = core.getInput('scr_id') || '${{ steps.scr.outputs.id }}';
+            const result = '${{ steps.summary.outputs.result }}';
+            const owner = context.repo.owner;
+            const repo  = context.repo.repo;
+
+            // find issue by SCR ID
+            const search = await github.rest.search.issuesAndPullRequests({
+              q: `repo:${owner}/${repo} is:issue in:title ${scrId}`
+            });
+            const issue = search.data.items.find(i => i.title.includes(scrId));
+            if (!issue) {
+              core.warning(`No SCR issue found for ${scrId}`);
+              return;
+            }
+
+            const issue_number = issue.number;
+            const body = `**CI Test Summary for ${scrId}**\n\nResult: \`${result}\`\n\nMerge: #${context.payload.pull_request.number}`;
+
+            // apply labels depending on result
+            if (result.startsWith('PASS')) {
+              await github.rest.issues.removeLabel({owner, repo, issue_number, name: 'rework'}).catch(()=>{});
+              await github.rest.issues.addLabels({owner, repo, issue_number, labels: ['closed']});
+              await github.rest.issues.removeLabel({owner, repo, issue_number, name: 'open'}).catch(()=>{});
+              await github.rest.issues.removeLabel({owner, repo, issue_number, name: 'in progress'}).catch(()=>{});
+              await github.rest.issues.createComment({owner, repo, issue_number, body});
+              // close issue
+              await github.rest.issues.update({owner, repo, issue_number, state: 'closed'});
+            } else {
+              // mark rework
+              await github.rest.issues.addLabels({owner, repo, issue_number, labels: ['rework']});
+              await github.rest.issues.removeLabel({owner, repo, issue_number, name: 'closed'}).catch(()=>{});
+              await github.rest.issues.createComment({owner, repo, issue_number, body: body + "\n\nOne or more tests failed. Please investigate."});
+            }
+          result-encoding: string
+
+      - name: Fallback note if SCR not detected
+        if: steps.scr.outputs.id == ''
+        run: |
+          echo "No SCR ID found in branch/title/body. Use branch 'feature/SCRxxxxxx' or include SCR ID in PR title/body."

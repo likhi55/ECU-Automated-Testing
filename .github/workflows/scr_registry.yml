@@ -1,0 +1,89 @@
+name: SCR Registry & Issue Sync
+
+on:
+  push:
+    paths:
+      - "scr/SCR*.md"
+      - "tools/scr_registry_gen.py"
+  pull_request:
+    paths:
+      - "scr/SCR*.md"
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  build-registry:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ensure Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Generate registry (json + md)
+        run: python tools/scr_registry_gen.py
+
+      - name: If on default branch, create missing SCR issues and wire registry
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = 'scr/registry.json';
+            let data = JSON.parse(fs.readFileSync(path, 'utf8'));
+
+            async function ensureIssue(scr) {
+              // try to find an existing issue by title containing the SCR ID
+              const q = `repo:${context.repo.owner}/${context.repo.repo} is:issue in:title ${scr.id}`;
+              const search = await github.rest.search.issuesAndPullRequests({ q });
+              let issue = search.data.items.find(i => i.title.includes(scr.id) && i.state !== 'closed');
+
+              if (!issue) {
+                const title = `[SCR] ${scr.id} - ${scr.title}`;
+                const body = `Auto-created for ${scr.id}\n\nSpec: \`${scr.path}\``;
+                const created = await github.rest.issues.create({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  title,
+                  body,
+                  labels: ['SCR', 'open']
+                });
+                issue = created.data;
+              }
+
+              scr.issue_number = issue.number;
+              scr.issue_url = issue.html_url;
+              // keep status label mirror if exists, default open
+              const statusLabel = (issue.labels || [])
+                .map(l => typeof l === 'string' ? l : l.name)
+                .find(n => ['open','in progress','rework','closed'].includes(n));
+              scr.status = statusLabel || 'open';
+            }
+
+            for (const scr of data.scr) {
+              await ensureIssue(scr);
+            }
+
+            fs.writeFileSync(path, JSON.stringify(data, null, 2));
+            // also refresh REGISTRY.md to reflect issue links/status
+            // (cheap way: re-run Python script in a child process)
+          result-encoding: string
+
+      - name: Rebuild REGISTRY.md after issue linking
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        run: python tools/scr_registry_gen.py
+
+      - name: Commit registry updates (main only)
+        if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [[ -n "$(git status --porcelain)" ]]; then
+            git add scr/REGISTRY.md scr/registry.json
+            git commit -m "chore: auto-update SCR registry"
+            git push
+          fi
