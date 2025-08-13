@@ -1,0 +1,14 @@
+CC := gcc
+CFLAGS := -Wall -Wextra -O2
+SRC := $(wildcard app/c_files/*.c) app/app.c app/calibration/calibration.c
+INC := -Iapp/h_files -Iapp/calibration
+BIN := build/ecu_app
+
+all: $(BIN)
+$(BIN): $(SRC)
+	mkdir -p $(dir $(BIN))
+	$(CC) $(CFLAGS) $(INC) -o $(BIN) $(SRC)
+
+clean:
+	rm -rf build
+.PHONY: all clean
